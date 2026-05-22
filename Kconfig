@@ -1,0 +1,7 @@
+mainmenu "WiFi Speed Test sample"
+
+config SPEED_TEST_HTTP_PORT
+	int "HTTP server port"
+	default 80
+
+source "Kconfig.zephyr"
