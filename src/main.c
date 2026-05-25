@@ -12,11 +12,13 @@
 #include <zephyr/net/http/server.h>
 #include <zephyr/net/http/service.h>
 #include <zephyr/logging/log.h>
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT
 #include "supp_events.h"
+#endif
 
 LOG_MODULE_REGISTER(speed_test, LOG_LEVEL_INF);
 
-#define AP_SSID    "BL618_SpeedTest"
+#define AP_SSID    "WiFi_SpeedTest"
 #define AP_PSK     "SpeedTest42"
 
 #define AP_IP      "10.15.84.1"
@@ -27,9 +29,11 @@ LOG_MODULE_REGISTER(speed_test, LOG_LEVEL_INF);
 #define CHUNK_SIZE      4096
 
 static K_SEM_DEFINE(ap_ready, 0, 1);
-static K_SEM_DEFINE(supp_ready, 0, 1);
 
 static struct net_mgmt_event_callback wifi_cb;
+
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT
+static K_SEM_DEFINE(supp_ready, 0, 1);
 static struct net_mgmt_event_callback supp_cb;
 
 static void supp_event_handler(struct net_mgmt_event_callback *cb,
@@ -37,6 +41,7 @@ static void supp_event_handler(struct net_mgmt_event_callback *cb,
 {
 	k_sem_give(&supp_ready);
 }
+#endif
 
 static void wifi_event_handler(struct net_mgmt_event_callback *cb,
 			       uint64_t mgmt_event, struct net_if *iface)
@@ -224,8 +229,9 @@ int main(void)
 
 	memset(speed_buf, 'D', sizeof(speed_buf));
 
-	LOG_INF("=== BL618 WiFi Speed Test ===");
+	LOG_INF("=== WiFi Speed Test ===");
 
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT
 	net_mgmt_init_event_callback(&supp_cb, supp_event_handler,
 		NET_EVENT_SUPPLICANT_READY);
 	net_mgmt_add_event_callback(&supp_cb);
@@ -236,6 +242,7 @@ int main(void)
 		return -1;
 	}
 	LOG_INF("Supplicant ready");
+#endif
 
 	net_mgmt_init_event_callback(&wifi_cb, wifi_event_handler,
 				     NET_EVENT_WIFI_AP_ENABLE_RESULT |
