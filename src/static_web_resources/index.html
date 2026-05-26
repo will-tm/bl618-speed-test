@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/png" href="/favicon.png">
   <title>WiFi Speed Test</title>
   <style>
     * {
@@ -176,7 +177,7 @@
   </style>
 </head>
 <body>
-  <h1>BL618 WiFi Speed Test</h1>
+  <h1>WiFi Speed Test</h1>
 
   <div class="gauge">
     <svg viewBox="0 0 220 220">
@@ -206,6 +207,7 @@
   </div>
 
   <div class="results">
+    <div>Ping<span id="pg">--</span><small>ms</small></div>
     <div>Download<span id="dl">--</span><small>Mbps</small></div>
     <div>Upload<span id="ul">--</span><small>Mbps</small></div>
   </div>
@@ -214,8 +216,22 @@
   <div class="st" id="st"></div>
 
   <script>
+    var CFG = {
+      DL_STREAMS:     4,
+      UL_STREAMS:     4,
+      TRANSFER_BYTES: 4 * 1024 * 1024,
+      PING_COUNT:     20,
+      PING_WARMUP:    10,
+      SPEED_WARMUP:   2000,
+      SAMPLE_INTERVAL:0.1,
+      SMOOTHING:      0.3,
+      TRIM_FRACTION:  0.2,
+      GAUGE_MAX:      10,
+      UL_CHUNK_SIZE:  (8 * 1024)
+    };
+
     var $ = function (id) { return document.getElementById(id); };
-    var ring = $('ring'), C = 628, MAX = 20;
+    var ring = $('ring'), C = 628;
     var cv = $('chart'), cx = cv.getContext('2d');
     var dlPts = [], ulPts = [];
 
@@ -229,7 +245,7 @@
 
     function gauge(mbps) {
       $('spd').textContent = mbps.toFixed(1);
-      ring.style.strokeDashoffset = C - C * Math.min(mbps / MAX, 1);
+      ring.style.strokeDashoffset = C - C * Math.min(mbps / CFG.GAUGE_MAX, 1);
     }
 
     function draw() {
@@ -279,114 +295,187 @@
       line(ulPts, 'rgb(168,85,247)', 0.15);
     }
 
-    function testDL() {
+    var smoothed = 0;
+
+    function testPing() {
+      var WARMUP = CFG.PING_WARMUP, TOTAL = WARMUP + CFG.PING_COUNT;
       return new Promise(function (resolve) {
-        dlPts = [];
-        var x = new XMLHttpRequest();
-        x.open('GET', '/api/download');
-        x.responseType = 'arraybuffer';
-        var t0 = 0, loaded0 = 0, last = 0;
-
-        x.onprogress = function (e) {
-          if (e.loaded > 0) {
-            var now = performance.now();
-            if (!t0) {
-              t0 = now;
-              loaded0 = e.loaded;
-              last = now;
-              return;
-            }
-            var s = (now - t0) / 1000;
-            if (s < 0.01) return;
-            var m = (e.loaded - loaded0) * 8 / 1e6 / s;
-            gauge(m);
-            if (now - last > 250) {
-              dlPts.push(m);
-              draw();
-              last = now;
-            }
-          }
-        };
-
-        x.onload = function () {
-          if (!t0) { resolve(0); return; }
-          var s = (performance.now() - t0) / 1000;
-          var m = (x.response.byteLength - loaded0) * 8 / 1e6 / s;
-          dlPts.push(m);
-          draw();
-          resolve(m);
-        };
-
-        x.onerror = function () { resolve(0); };
-        x.send();
+        var times = [], i = 0;
+        function next() {
+          var t0 = performance.now();
+          var x = new XMLHttpRequest();
+          x.open('GET', '/api/ping?t=' + t0);
+          x.onload = function () {
+            if (i >= WARMUP) times.push(performance.now() - t0);
+            i++;
+            if (i < TOTAL) { next(); return; }
+            times.sort(function (a, b) { return a - b; });
+            var trim = Math.floor(times.length * CFG.TRIM_FRACTION);
+            var trimmed = times.slice(trim, times.length - trim);
+            if (!trimmed.length) trimmed = times;
+            var sum = 0;
+            for (var j = 0; j < trimmed.length; j++) sum += trimmed[j];
+            resolve(sum / trimmed.length);
+          };
+          x.onerror = function () {
+            i++;
+            if (i < TOTAL) next(); else resolve(0);
+          };
+          x.send();
+        }
+        next();
       });
     }
 
-    function testUL() {
-      return new Promise(function (resolve) {
-        ulPts = [];
-        var d = new Uint8Array(2 * 1024 * 1024);
-        var x = new XMLHttpRequest();
-        x.open('POST', '/api/upload');
-        var t0 = 0, loaded0 = 0, last = 0, lastSpeed = 0;
+    function trimmedMean(arr) {
+      if (arr.length < 4) return arr.length ? arr[arr.length - 1] : 0;
+      var sorted = arr.slice().sort(function (a, b) { return a - b; });
+      var trim = Math.floor(sorted.length * CFG.TRIM_FRACTION);
+      var s = 0, count = sorted.length - trim * 2;
+      for (var j = trim; j < sorted.length - trim; j++) s += sorted[j];
+      return s / count;
+    }
 
-        x.upload.onprogress = function (e) {
-          if (e.loaded > 0) {
+    function createMeter(mode) {
+      var isUp = (mode === 'ul');
+      var pts = [];
+      var t0 = 0, last = 0, prevBytes = 0, warmup = true;
+      var steadyStart = 0, steadyBytes = 0;
+      smoothed = 0;
+      if (isUp) { ulPts = []; } else { dlPts = []; }
+
+      function storePts() {
+        if (isUp) { ulPts = pts; } else { dlPts = pts; }
+      }
+
+      return {
+        sample: function (totalBytes) {
+          var now = performance.now();
+          if (!t0) { t0 = now; last = now; return; }
+          var dt = (now - last) / 1000;
+          if (dt < CFG.SAMPLE_INTERVAL) return;
+          var m = (totalBytes - prevBytes) * 8 / 1e6 / dt;
+          smoothed = smoothed ? smoothed * (1 - CFG.SMOOTHING) + m * CFG.SMOOTHING : m;
+          gauge(smoothed);
+          pts.push(smoothed);
+          storePts();
+          draw();
+          if (warmup && (now - t0) < CFG.SPEED_WARMUP) { last = now; prevBytes = totalBytes; return; }
+          if (warmup) {
+            warmup = false;
+            steadyStart = now;
+            steadyBytes = totalBytes;
+          }
+          last = now;
+          prevBytes = totalBytes;
+        },
+        finish: function (totalBytes) {
+          var m = pts.length >= 4 ? trimmedMean(pts) : 0;
+          if (!m) {
             var now = performance.now();
-            if (!t0) {
-              t0 = now;
-              loaded0 = e.loaded;
-              last = now;
-              return;
-            }
-            var s = (now - t0) / 1000;
-            if (s < 0.01) return;
-            var m = (e.loaded - loaded0) * 8 / 1e6 / s;
-            lastSpeed = m;
-            gauge(m);
-            if (now - last > 250) {
-              ulPts.push(m);
-              draw();
-              last = now;
+            if (steadyStart) {
+              m = (totalBytes - steadyBytes) * 8 / 1e6 / ((now - steadyStart) / 1000);
+            } else {
+              m = totalBytes * 8 / 1e6 / ((now - t0) / 1000);
             }
           }
-        };
-
-        x.onload = function () {
-          if (!t0) { resolve(0); return; }
-          ulPts.push(lastSpeed);
+          pts.push(m);
+          storePts();
           draw();
-          resolve(lastSpeed);
-        };
+          return m;
+        }
+      };
+    }
 
-        x.onerror = function () { resolve(0); };
-        x.send(d);
+    function testSpeed(mode, n) {
+      var isUp = (mode === 'ul');
+      var perStream = CFG.TRANSFER_BYTES / n;
+      return new Promise(function (resolve) {
+        var meter = createMeter(mode);
+        var done = 0, totalBytes = 0;
+
+        if (isUp) {
+          var ulChunk = CFG.UL_CHUNK_SIZE;
+          function runStream(idx, remaining) {
+            if (remaining <= 0) {
+              done++;
+              if (done >= n) resolve(meter.finish(totalBytes));
+              return;
+            }
+            var sz = Math.min(ulChunk, remaining);
+            var x = new XMLHttpRequest();
+            x.open('POST', '/api/upload/' + idx);
+            x.onload = function () {
+              totalBytes += sz;
+              meter.sample(totalBytes);
+              runStream(idx, remaining - sz);
+            };
+            x.onerror = function () { done++; if (done >= n) resolve(0); };
+            x.send(new Uint8Array(sz));
+          }
+          for (var i = 0; i < n; i++) runStream(i, perStream);
+        } else {
+          var bytes = new Array(n).fill(0);
+          for (var i = 0; i < n; i++) {
+            (function (idx) {
+              var x = new XMLHttpRequest();
+              x.open('GET', '/api/download/' + idx);
+              x.responseType = 'arraybuffer';
+              x.onprogress = function (e) {
+                bytes[idx] = e.loaded;
+                var sum = 0;
+                for (var j = 0; j < n; j++) sum += bytes[j];
+                meter.sample(sum);
+              };
+              x.onload = function () {
+                bytes[idx] = x.response.byteLength;
+                done++;
+                if (done >= n) {
+                  var sum = 0;
+                  for (var j = 0; j < n; j++) sum += bytes[j];
+                  resolve(meter.finish(sum));
+                }
+              };
+              x.onerror = function () { done++; if (done >= n) resolve(0); };
+              x.send();
+            })(i);
+          }
+        }
       });
     }
 
     function run() {
       var b = $('btn');
       b.disabled = true;
+      $('pg').textContent = '--';
       $('dl').textContent = '--';
       $('ul').textContent = '--';
       dlPts = [];
       ulPts = [];
       draw();
 
-      ring.style.stroke = '#00d4ff';
-      $('lbl').textContent = 'DOWNLOAD';
-      $('lbl').style.color = '#00d4ff';
-      $('st').textContent = 'Testing download (2 MB)...';
+      ring.style.stroke = '#4ade80';
+      $('lbl').textContent = 'PING';
+      $('lbl').style.color = '#4ade80';
+      $('st').textContent = 'Measuring latency...';
       gauge(0);
 
-      testDL().then(function (dl) {
+      testPing().then(function (ping) {
+        $('pg').textContent = ping ? Math.round(ping) : '--';
+        gauge(0);
+        ring.style.stroke = '#00d4ff';
+        $('lbl').textContent = 'DOWNLOAD';
+        $('lbl').style.color = '#00d4ff';
+        $('st').textContent = 'Testing download (' + CFG.DL_STREAMS + ' streams)...';
+        return testSpeed('dl', CFG.DL_STREAMS);
+      }).then(function (dl) {
         $('dl').textContent = dl.toFixed(1);
         gauge(0);
         ring.style.stroke = '#a855f7';
         $('lbl').textContent = 'UPLOAD';
         $('lbl').style.color = '#a855f7';
-        $('st').textContent = 'Testing upload (2 MB)...';
-        return testUL();
+        $('st').textContent = 'Testing upload (' + CFG.UL_STREAMS + ' streams)...';
+        return testSpeed('ul', CFG.UL_STREAMS);
       }).then(function (ul) {
         $('ul').textContent = ul.toFixed(1);
         gauge(0);

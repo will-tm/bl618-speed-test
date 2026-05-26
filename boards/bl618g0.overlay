@@ -1,0 +1,13 @@
+/*
+ * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+&sram0 {
+	reg = <0x62fc0000 DT_SIZE_K(382)>;
+};
+
+&sram1 {
+	status = "disabled";
+};

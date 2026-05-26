@@ -4,4 +4,17 @@ config SPEED_TEST_HTTP_PORT
 	int "HTTP server port"
 	default 80
 
+config SPEED_TEST_STA_MODE
+	bool "Station mode (connect to existing AP)"
+
+config SPEED_TEST_STA_SSID
+	string "Station SSID"
+	default ""
+	depends on SPEED_TEST_STA_MODE
+
+config SPEED_TEST_STA_PSK
+	string "Station PSK"
+	default ""
+	depends on SPEED_TEST_STA_MODE
+
 source "Kconfig.zephyr"

@@ -131,3 +131,4 @@ node_modules
 build
 .cache
 build.sh
+CLAUDE.md

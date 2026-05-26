@@ -21,3 +21,8 @@ generate_inc_file_for_target(app
   ${gen_dir}/index.html.gz.inc
   --gzip
 )
+
+generate_inc_file_for_target(app
+  src/static_web_resources/favicon.png
+  ${gen_dir}/favicon.png.inc
+)
